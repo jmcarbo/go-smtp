@@ -67,7 +67,7 @@ func NewServer(be Backend) *Server {
 
 					conn.SetUser(user)
 					return nil
-				})
+				}),
 			sasl.Login: func(conn *Conn) sasl.Server {
 				return sasl.NewLoginServer(func(username, password string) error {
 					user, err := be.Login(username, password)
@@ -77,7 +77,7 @@ func NewServer(be Backend) *Server {
 
 					conn.SetUser(user)
 					return nil
-				})
+				}),
 			},
 			},
 		},
