@@ -324,7 +324,9 @@ func (c *Conn) handleAuth(arg string) {
 
 	response := ir
 	for {
+
 		challenge, done, err := sasl.Next(response)
+                fmt.Printf("Calling sasl with response %s challenge %s, done %v\n", response, challenge, done)
 		if err != nil {
 			c.WriteResponse(454, err.Error())
 			return
