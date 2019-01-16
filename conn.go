@@ -450,6 +450,7 @@ func (c *Conn) nextDeadline() time.Time {
 }
 
 func (c *Conn) WriteResponse(code int, text ...string) {
+  fmt.Printf("%d --- %s\n", code, strings.Join(text, " "))
 	// TODO: error handling
 
 	c.conn.SetDeadline(c.nextDeadline())
