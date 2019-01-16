@@ -81,6 +81,7 @@ func (c *Conn) handle(cmd string, arg string) {
 	}
 
 	cmd = strings.ToUpper(cmd)
+        fmt.Printf("Command: %s Arg %s\n", cmd, arg)
 	switch cmd {
 	case "SEND", "SOML", "SAML", "EXPN", "HELP", "TURN":
 		// These commands are not implemented in any state
