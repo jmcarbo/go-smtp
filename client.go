@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/textproto"
@@ -27,19 +28,32 @@ type Client struct {
 	// whether the Client is using TLS
 	tls        bool
 	serverName string
+	lmtp       bool
 	// map of supported extensions
 	ext map[string]string
 	// supported auth mechanisms
-	auth       []string
-	localName  string // the name to use in HELO/EHLO
-	didHello   bool   // whether we've said HELO/EHLO
-	helloError error  // the error from the hello
+	auth        []string
+	localName   string // the name to use in HELO/EHLO/LHLO
+	didHello    bool   // whether we've said HELO/EHLO/LHLO
+	helloError  error  // the error from the hello
+	rcptToCount int    // number of recipients
 }
 
 // Dial returns a new Client connected to an SMTP server at addr.
 // The addr must include a port, as in "mail.example.com:smtp".
 func Dial(addr string) (*Client, error) {
 	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	host, _, _ := net.SplitHostPort(addr)
+	return NewClient(conn, host)
+}
+
+// DialTLS returns a new Client connected to an SMTP server via TLS at addr.
+// The addr must include a port, as in "mail.example.com:smtps".
+func DialTLS(addr string, tlsConfig *tls.Config) (*Client, error) {
+	conn, err := tls.Dial("tcp", addr, tlsConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +70,19 @@ func NewClient(conn net.Conn, host string) (*Client, error) {
 		text.Close()
 		return nil, err
 	}
-	c := &Client{Text: text, conn: conn, serverName: host, localName: "localhost"}
+	_, isTLS := conn.(*tls.Conn)
+	c := &Client{Text: text, conn: conn, serverName: host, localName: "localhost", tls: isTLS}
+	return c, nil
+}
+
+// NewClientLMTP returns a new LMTP Client (as defined in RFC 2033) using an
+// existing connector and host as a server name to be used when authenticating.
+func NewClientLMTP(conn net.Conn, host string) (*Client, error) {
+	c, err := NewClient(conn, host)
+	if err != nil {
+		return nil, err
+	}
+	c.lmtp = true
 	return c, nil
 }
 
@@ -83,6 +109,9 @@ func (c *Client) hello() error {
 // automatically otherwise. If Hello is called, it must be called before
 // any of the other methods.
 func (c *Client) Hello(localName string) error {
+	if err := validateLine(localName); err != nil {
+		return err
+	}
 	if c.didHello {
 		return errors.New("smtp: Hello called after other methods")
 	}
@@ -113,7 +142,11 @@ func (c *Client) helo() error {
 // ehlo sends the EHLO (extended hello) greeting to the server. It
 // should be the preferred greeting for servers that support it.
 func (c *Client) ehlo() error {
-	_, msg, err := c.cmd(250, "EHLO %s", c.localName)
+	cmd := "EHLO"
+	if c.lmtp {
+		cmd = "LHLO"
+	}
+	_, msg, err := c.cmd(250, "%s %s", cmd, c.localName)
 	if err != nil {
 		return err
 	}
@@ -169,6 +202,9 @@ func (c *Client) TLSConnectionState() (state tls.ConnectionState, ok bool) {
 // does not necessarily indicate an invalid address. Many servers
 // will not verify addresses for security reasons.
 func (c *Client) Verify(addr string) error {
+	if err := validateLine(addr); err != nil {
+		return err
+	}
 	if err := c.hello(); err != nil {
 		return err
 	}
@@ -191,7 +227,7 @@ func (c *Client) Auth(a sasl.Client) error {
 	}
 	resp64 := make([]byte, encoding.EncodedLen(len(resp)))
 	encoding.Encode(resp64, resp)
-	code, msg64, err := c.cmd(0, "AUTH %s %s", mech, resp64)
+	code, msg64, err := c.cmd(0, strings.TrimSpace(fmt.Sprintf("AUTH %s %s", mech, resp64)))
 	for err == nil {
 		var msg []byte
 		switch code {
@@ -231,6 +267,9 @@ func (c *Client) Auth(a sasl.Client) error {
 // parameter.
 // This initiates a mail transaction and is followed by one or more Rcpt calls.
 func (c *Client) Mail(from string) error {
+	if err := validateLine(from); err != nil {
+		return err
+	}
 	if err := c.hello(); err != nil {
 		return err
 	}
@@ -248,8 +287,14 @@ func (c *Client) Mail(from string) error {
 // A call to Rcpt must be preceded by a call to Mail and may be followed by
 // a Data call or another Rcpt call.
 func (c *Client) Rcpt(to string) error {
-	_, _, err := c.cmd(25, "RCPT TO:<%s>", to)
-	return err
+	if err := validateLine(to); err != nil {
+		return err
+	}
+	if _, _, err := c.cmd(25, "RCPT TO:<%s>", to); err != nil {
+		return err
+	}
+	c.rcptToCount++
+	return nil
 }
 
 type dataCloser struct {
@@ -259,8 +304,18 @@ type dataCloser struct {
 
 func (d *dataCloser) Close() error {
 	d.WriteCloser.Close()
-	_, _, err := d.c.Text.ReadResponse(250)
-	return err
+	if d.c.lmtp {
+		for d.c.rcptToCount > 0 {
+			if _, _, err := d.c.Text.ReadResponse(250); err != nil {
+				return err
+			}
+			d.c.rcptToCount--
+		}
+		return nil
+	} else {
+		_, _, err := d.c.Text.ReadResponse(250)
+		return err
+	}
 }
 
 // Data issues a DATA command to the server and returns a writer that
@@ -292,12 +347,20 @@ var testHookStartTLS func(*tls.Config) // nil, except for tests
 // messages is accomplished by including an email address in the to
 // parameter but not including it in the r headers.
 //
-// The SendMail function and the the net/smtp package are low-level
+// The SendMail function and the net/smtp package are low-level
 // mechanisms and provide no support for DKIM signing, MIME
 // attachments (see the mime/multipart package), or other mail
 // functionality. Higher-level packages exist outside of the standard
 // library.
 func SendMail(addr string, a sasl.Client, from string, to []string, r io.Reader) error {
+	if err := validateLine(from); err != nil {
+		return err
+	}
+	for _, recp := range to {
+		if err := validateLine(recp); err != nil {
+			return err
+		}
+	}
 	c, err := Dial(addr)
 	if err != nil {
 		return err
@@ -316,10 +379,11 @@ func SendMail(addr string, a sasl.Client, from string, to []string, r io.Reader)
 		}
 	}
 	if a != nil && c.ext != nil {
-		if _, ok := c.ext["AUTH"]; ok {
-			if err = c.Auth(a); err != nil {
-				return err
-			}
+		if _, ok := c.ext["AUTH"]; !ok {
+			return errors.New("smtp: server doesn't support AUTH")
+		}
+		if err = c.Auth(a); err != nil {
+			return err
 		}
 	}
 	if err = c.Mail(from); err != nil {
@@ -367,7 +431,20 @@ func (c *Client) Reset() error {
 	if err := c.hello(); err != nil {
 		return err
 	}
-	_, _, err := c.cmd(250, "RSET")
+	if _, _, err := c.cmd(250, "RSET"); err != nil {
+		return err
+	}
+	c.rcptToCount = 0
+	return nil
+}
+
+// Noop sends the NOOP command to the server. It does nothing but check
+// that the connection to the server is okay.
+func (c *Client) Noop() error {
+	if err := c.hello(); err != nil {
+		return err
+	}
+	_, _, err := c.cmd(250, "NOOP")
 	return err
 }
 

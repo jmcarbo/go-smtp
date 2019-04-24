@@ -25,50 +25,62 @@ type backend struct {
 	userErr error
 }
 
-func (be *backend) Login(username, password string) (smtp.User, error) {
+func (be *backend) Login(_ *smtp.ConnectionState, username, password string) (smtp.Session, error) {
 	if be.userErr != nil {
-		return &user{}, be.userErr
+		return &session{}, be.userErr
 	}
 
 	if username != "username" || password != "password" {
 		return nil, errors.New("Invalid username or password")
 	}
-	return &user{backend: be}, nil
+	return &session{backend: be}, nil
 }
 
-func (be *backend) AnonymousLogin() (smtp.User, error) {
+func (be *backend) AnonymousLogin(_ *smtp.ConnectionState) (smtp.Session, error) {
 	if be.userErr != nil {
-		return &user{}, be.userErr
+		return &session{}, be.userErr
 	}
 
-	return &user{backend: be, anonymous: true}, nil
+	return &session{backend: be, anonymous: true}, nil
 }
 
-type user struct {
+type session struct {
 	backend   *backend
 	anonymous bool
+
+	msg *message
 }
 
-func (u *user) Send(from string, to []string, r io.Reader) error {
-	if b, err := ioutil.ReadAll(r); err != nil {
-		return err
-	} else {
-		msg := &message{
-			From: from,
-			To:   to,
-			Data: b,
-		}
+func (s *session) Reset() {
+	s.msg = &message{}
+}
 
-		if u.anonymous {
-			u.backend.anonmsgs = append(u.backend.anonmsgs, msg)
-		} else {
-			u.backend.messages = append(u.backend.messages, msg)
-		}
-	}
+func (s *session) Logout() error {
 	return nil
 }
 
-func (u *user) Logout() error {
+func (s *session) Mail(from string) error {
+	s.Reset()
+	s.msg.From = from
+	return nil
+}
+
+func (s *session) Rcpt(to string) error {
+	s.msg.To = append(s.msg.To, to)
+	return nil
+}
+
+func (s *session) Data(r io.Reader) error {
+	if b, err := ioutil.ReadAll(r); err != nil {
+		return err
+	} else {
+		s.msg.Data = b
+		if s.anonymous {
+			s.backend.anonmsgs = append(s.backend.anonmsgs, s.msg)
+		} else {
+			s.backend.messages = append(s.backend.messages, s.msg)
+		}
+	}
 	return nil
 }
 
@@ -333,7 +345,7 @@ func TestServer_authDisabled(t *testing.T) {
 
 	io.WriteString(c, "AUTH PLAIN\r\n")
 	scanner.Scan()
-	if scanner.Text() != "500 Syntax error, AUTH command unrecognized" {
+	if scanner.Text() != "500 5.5.2 Syntax error, AUTH command unrecognized" {
 		t.Fatal("Invalid AUTH response with auth disabled:", scanner.Text())
 	}
 }
@@ -424,7 +436,7 @@ func TestServer_anonymousUserError(t *testing.T) {
 
 	io.WriteString(c, "MAIL FROM:<root@nsa.gov>\r\n")
 	scanner.Scan()
-	if scanner.Text() != "502 Please authenticate first" {
+	if scanner.Text() != "502 5.7.0 Please authenticate first" {
 		t.Fatal("Backend refused anonymous mail but client was permitted:", scanner.Text())
 	}
 }
