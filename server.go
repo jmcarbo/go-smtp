@@ -75,7 +75,7 @@ func NewServer(be Backend) *Server {
 			sasl.Login: func(conn *Conn) sasl.Server {
 				return sasl.NewLoginServer(func(username, password string) error {
 					state := conn.State()
-					session, err := be.Login(state, username, password)
+					session, err := be.Login(&state, username, password)
 					if err != nil {
 						return err
 					}
