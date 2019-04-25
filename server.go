@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jmcarbo/go-sasl"
+	"github.com/emersion/go-sasl"
 )
 
 var errTCPAndLMTP = errors.New("smtp: cannot start LMTP server listening on a TCP socket")
@@ -74,12 +74,13 @@ func NewServer(be Backend) *Server {
 			},
 			sasl.Login: func(conn *Conn) sasl.Server {
 				return sasl.NewLoginServer(func(username, password string) error {
-					user, err := be.Login(username, password)
+					state := conn.State()
+					session, err := be.Login(state, username, password)
 					if err != nil {
 						return err
 					}
 
-					conn.SetUser(user)
+					conn.SetSession(session)
 					return nil
 				})
 			},
