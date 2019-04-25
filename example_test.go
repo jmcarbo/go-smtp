@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/emersion/go-sasl"
+	"github.com/jmcarbo/go-sasl"
 	"github.com/jmcarbo/go-smtp"
 )
 
